@@ -1,10 +1,5 @@
 set -ex
 
-# mix-version on a single known-good GPU (TP=1)
-export HIP_VISIBLE_DEVICES="0"
-
-# it seems some bug on this node, set it to lo otherwise NCCL error will occur
-export NCCL_SOCKET_IFNAME=lo
 python -m sglang.launch_server \
     --model-path Qwen/Qwen3-0.6B \
     --tp-size 1 \
