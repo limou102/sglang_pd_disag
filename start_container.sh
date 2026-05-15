@@ -26,9 +26,9 @@
 # -----
 #     bash start_container.sh                 # uses defaults below
 #
-#     IMAGE=vllm/vllm-openai-rocm:v0.20.0 \
-#     CONTAINER=vllm-rdma \
-#     EXTRA_MOUNTS="-v /mnt:/mnt" \
+#     IMAGE=lmsysorg/sglang-rocm:v0.5.11-rocm720-mi35x-20260514 \
+#     CONTAINER=sglang-rdma \
+#     EXTRA_MOUNTS="-v /apps:/apps" \
 #         bash start_container.sh
 #
 # Re-runnable: forcibly removes any prior container with the same name.
@@ -36,7 +36,7 @@
 set -euo pipefail
 
 # ---- user-configurable -----------------------------------------------------
-IMAGE=${IMAGE:-lmsysorg/sglang:v0.5.11-rocm720-mi30x}
+IMAGE=${IMAGE:-lmsysorg/sglang-rocm:v0.5.11-rocm720-mi35x-20260514}
 CONTAINER=${CONTAINER:-sglang-rdma}
 HOST_HOME=${HOST_HOME:-$HOME}
 
@@ -146,7 +146,7 @@ docker run \
     -d \
     --name="$CONTAINER" \
     --ipc=host \
-    --ulimit memlock=-1 \
+    --ulimit memlock=-1:-1 \
     --network=host \
     --device=/dev/kfd \
     --device=/dev/dri \
@@ -158,6 +158,7 @@ docker run \
     --device=/dev/infiniband \
     --entrypoint /bin/bash \
     -v "$HOST_HOME":"$HOST_HOME" \
+    -v /mnt:/mnt \
     "${EXTRA_MOUNTS[@]}" \
     "${BIND_MOUNTS[@]}" \
     "$IMAGE" \
