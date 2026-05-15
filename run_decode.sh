@@ -10,7 +10,7 @@ set -ex
 
 cd "$(dirname "$0")"
 
-MODEL_PATH=${MODEL_PATH:-/mnt/vast/limou/models/MiniMaxAI/MiniMax-M2.7}
+MODEL_PATH=${MODEL_PATH:-/path/to/model}
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-MiniMax-M2.7}
 TP_SIZE=${TP_SIZE:-2}
 

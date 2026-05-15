@@ -17,8 +17,9 @@
 # same for any other vendor (.so available on the host, .driver missing in the
 # container).
 #
-# Run inside the SAME environment in which you intend to start vLLM:
-#   bash multi_node/check_rdma.sh
+# Run inside the SAME container in which you intend to start the inference
+# server:
+#   bash check_rdma.sh
 #
 # Re-run this script after restarting the container to recreate the bind.
 # =============================================================================
