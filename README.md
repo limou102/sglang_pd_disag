@@ -191,17 +191,14 @@ bash run_mix.sh
 ## 4. 样例压测结果
 
 ```bash
-python3 agent_throughput.py \
-  --server http://10.2.122.47:8000 \
-  --model MiniMax-M2.7 \
-  --tokenizer MiniMaxAI/MiniMax-M2.7 \
-  --workload-config workloads/code_agent_128k.yaml \
-  --max-qps 2.0 \
-  --name sglang-agent-0
+# prefill-decode disaggregation, both tp_size=2
+# max_qps=3.0 max_inflight=40
+python3 agent_throughput.py   --server http://10.2.122.47:8000   --model MiniMax-M2.7   --tokenizer MiniMaxAI/MiniMax-M2.7   --workload-config workloads/code_agent_128k.yaml   --max-qps 3.0   --name sglang-agent-0 --max-inflight 40
 Loaded workload config from: workloads/code_agent_128k.yaml
-  Applied: 23 parameters
-  Skipped (CLI override): 2 parameters
-    - max_qps (CLI override: 2.0)
+  Applied: 22 parameters
+  Skipped (CLI override): 3 parameters
+    - max_qps (CLI override: 3.0)
+    - max_inflight (CLI override: 40)
     - tokenizer (CLI override: MiniMaxAI/MiniMax-M2.7)
 Loading tokenizer: MiniMaxAI/MiniMax-M2.7
 Tokenizer loaded successfully (vocab size: 200000)
@@ -222,81 +219,87 @@ New tokens per request (mean / median): 2,500 / 1,000
 Max prefix size (retirement): 120,000 tokens
 Generation length (mean / median): 500 / 280
 GPUs: 4
-Ramp: 0.05 -> 2.00 QPS over 45s
-Sustain: 2.00 QPS for 600s
+Ramp: 0.05 -> 3.00 QPS over 45s
+Sustain: 3.00 QPS for 600s
 Initial sessions: 4
 New session rate: 4.0%
-Max in-flight (backpressure): 16
+Max in-flight (backpressure): 40
 Window size: 30s
 ================================================================================
 
-Starting ramp: 0.05 -> 2.00 QPS over 45s
-Then sustain 2.00 QPS for 600s
-Backpressure: pause when in-flight > 16
+Starting ramp: 0.05 -> 3.00 QPS over 45s
+Then sustain 3.00 QPS for 600s
+Backpressure: pause when in-flight > 40
 
-[  48.6s] Prefill:        0 tok/s (1s) |   11,768 tok/s (30s) | Cache:  81.7% | Gen:   75.5 tok/s | Reqs:    31/   47 | In-flight:   16 | Errors:   0WARNING: Hit max_inflight (16) - traffic timing may diverge from seed (non-deterministic)
-[ 646.2s] Prefill:  341,042 tok/s (1s) |   64,572 tok/s (30s) | Cache:  95.3% | Gen:   29.8 tok/s | Reqs:   612/  628 | In-flight:   16 | Errors:   000
-
+[  62.1s] Prefill:        0 tok/s (1s) |   68,117 tok/s (30s) | Cache: 100.0% | Gen:   42.1 tok/s | Reqs:    57/   97 | In-flight:   40 | Errors:   0
+WARNING: Hit max_inflight (40) - traffic timing may diverge from seed (non-deterministic)
+[ 646.4s] Prefill:   21,049 tok/s (1s) |   52,198 tok/s (30s) | Cache:  97.7% | Gen:   62.0 tok/s | Reqs:   610/  650 | In-flight:   40 | Errors:   00
 Waiting for remaining requests to complete...
 
 Final Results:
 --------------------------------------------------------------------------------
-Total requests sent: 628
-Completed: 628
+Total requests sent: 650
+Completed: 650
 Errors: 0
 Success rate: 100.0%
-Actual benchmark duration: 667.7s
-Actual average QPS: 0.94 (target: 0.05 -> 2.00)
+Actual benchmark duration: 704.8s
+Actual average QPS: 0.92 (target: 0.05 -> 3.00)
 
 Actual Prompt Length Distribution:
-  Mean: 65283 tokens
-  Std Dev: 30116 tokens
-  p50: 68425 tokens
-  p90: 103428 tokens
-  p99: 114820 tokens
+  Mean: 68012 tokens
+  Std Dev: 27177 tokens
+  p50: 70545 tokens
+  p90: 106403 tokens
+  p99: 114847 tokens
 
 Actual Generation Length Distribution:
-  Mean: 413.3 tokens (target: 500)
-  Median (p50): 302 tokens (target: 280)
-  Std Dev: 410.4 tokens
-  p90: 855 tokens
-  p99: 2097 tokens
+  Mean: 434.9 tokens (target: 500)
+  Median (p50): 298 tokens (target: 280)
+  Std Dev: 511.1 tokens
+  p90: 923 tokens
+  p99: 2626 tokens
 
 TTFT (Time to First Token):
-  p50: 1005.6ms
-  p90: 2870.4ms
-  p99: 7825.0ms
+  p50: 25300.7ms
+  p90: 42974.0ms
+  p99: 46934.7ms
+
+TPOT (Time Per Output Token, excl. first):
+  Samples: 624 (filtered: gen_len>1 & gen_time>=50ms)
+  Mean: 31.7ms (31.5 tok/s/req)
+  p50: 30.4ms
+  p90: 43.6ms
+  p99: 108.7ms
 
 Peak Prefill Throughput:
-  Total: 414,716 tokens/sec (24,882,960 tokens/min)
-  Per GPU: 103,679 tokens/sec (6,220,740 tokens/min)
+  Total: 402,798 tokens/sec (24,167,880 tokens/min)
+  Per GPU: 100,700 tokens/sec (6,041,970 tokens/min)
 
 Average Throughput:
-  Context: 921,030 tokens/min/GPU (15,350 tokens/sec/GPU)
-  Generation: 37.2 tokens/sec (MTP compensated)
-    (filtered 1 samples with generation_time < 50ms)
+  Context: 940,851 tokens/min/GPU (15,681 tokens/sec/GPU)
+  Generation: 48.6 tokens/sec (MTP compensated)
+    (filtered 26 samples with generation_time < 50ms)
 
 Cache Statistics:
-  Ideal cache hit rate: 101.0% (assuming no eviction)
-  Actual cache hit rate: 94.3%
-  Cache efficiency: 93.4% (actual/ideal)
-  Eviction rate: 6.6% of expected cache was evicted
-  Total tokens: 40,997,420 (prefix: 41,395,838, cached: 38,672,652, evicted: 2,723,186)
+  Ideal cache hit rate: 101.1% (assuming no eviction)
+  Actual cache hit rate: 99.5%
+  Cache efficiency: 98.4% (actual/ideal)
+  Eviction rate: 1.6% of expected cache was evicted
+  Total tokens: 44,207,528 (prefix: 44,690,092, cached: 43,983,308, evicted: 706,784)
 
 Phase Throughput Breakdown (input TPM includes cache; uncached = actual prefill work):
-  phase     dur(s)  reqs   qps    input TPM   cached TPM   uncached TPM  visible TPM  reason TPM  cache%  TTFT p50  TTFT p90
-  --------------------------------------------------------------------------------------------------------------------------
-  ramp        45.0    27  0.60      332,528      251,207         81,321          729       9,945   75.5%    102.2ms    441.0ms
-  sustain    600.0   584  0.97    3,929,805    3,708,418        221,387        2,504      21,729   94.4%   1041.5ms   2942.3ms
-  drain       21.7    17  0.78    4,000,673    3,862,965        137,708        4,017      21,450   96.6%   1222.2ms   2336.9ms
+  phase     dur(s)  reqs   qps    input TPM   cached TPM   uncached TPM  visible TPM  reason TPM  cache%  TTFT p50  TTFT p90  TPOT p50  TPOT p90
+  ----------------------------------------------------------------------------------------------------------------------------------------------
+  ramp        45.0    31  0.69    1,199,276    1,199,131            145          668      10,215  100.0%    165.8ms    219.7ms     16.8ms     18.8ms
+  sustain    600.0   576  0.96    4,061,781    4,047,574         14,207        1,483      23,867   99.7%  24844.5ms  42369.6ms     34.3ms     43.9ms
+  drain       59.5    43  0.72    2,711,880    2,629,180         82,699          980      20,212   97.0%  42806.5ms  44617.7ms     15.4ms     24.0ms
   (per-GPU: divide TPM by 4)
 
 ChatSession Statistics:
   Total sessions: 27
-  Active: 17, Retired: 10
+  Active: 14, Retired: 13
   Target new session rate: 4.0%
-  Actual new session rate: 3.7%
-  Final prefix sizes: min=14,922, max=120,000, mean=88,481
-
+  Actual new session rate: 3.5%
+  Final prefix sizes: min=22,691, max=120,000, mean=94,178
 ```
 
