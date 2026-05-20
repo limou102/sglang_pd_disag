@@ -21,9 +21,16 @@
 #
 # Tunables (env):
 #   PEER_IP           (client mode) data-plane IP of the server
-#   NICS              comma-separated subset of NIC names to test
-#                     (default: all ACTIVE NICs with a routable GID, minus SKIP_NICS)
-#   SKIP_NICS=xeth0   comma-separated NIC names to exclude from the default set.
+#   NICS              comma-separated subset of NIC names to test.
+#                     Default: auto-detect the data-plane fabric by grouping
+#                     ACTIVE RDMA NICs by kernel driver and picking the
+#                     largest group (same heuristic as run_prefill.sh /
+#                     run_decode.sh). This drops management/control NICs
+#                     automatically (e.g. on this fleet the 2 bnxt_re NICs
+#                     used for the host IP / public NIC are skipped, only
+#                     the 8 ionic data-plane NICs are tested).
+#   SKIP_NICS=xeth0   additional comma-separated NIC names to exclude on top
+#                     of the auto-detected set (or on top of NICS=...).
 #                     xeth0 is a Pensando/Broadcom storage-mgmt port that
 #                     advertises an ibverbs device but lives on a different L2
 #                     than the rdma* ports; it always fails RC ping-pong
@@ -113,18 +120,54 @@ print_inventory() {
     done < <("$@")
 }
 
+# Auto-pick the data-plane fabric: group ACTIVE RDMA NICs by kernel driver
+# and return the largest group as a comma-separated list. Same heuristic the
+# inference run scripts use, so this preflight matches the NICs mooncake will
+# actually pick at runtime.
+auto_detect_data_plane_nics() {
+    declare -A by_driver=()
+    local d n s drv
+    for d in /sys/class/infiniband/*; do
+        [[ -d "$d" ]] || continue
+        n=$(basename "$d")
+        s=$(cat "$d/ports/1/state" 2>/dev/null || echo "")
+        [[ "$s" == *"ACTIVE"* ]] || continue
+        drv=$(readlink -f "$d/device/driver" 2>/dev/null)
+        drv=$(basename "${drv:-unknown}")
+        by_driver[$drv]+="$n "
+    done
+    local best="" best_count=0 count
+    for drv in "${!by_driver[@]}"; do
+        # shellcheck disable=SC2086
+        count=$(echo ${by_driver[$drv]} | wc -w)
+        if (( count > best_count )); then
+            best_count=$count
+            best=$drv
+        fi
+    done
+    [[ -z "$best" ]] && return 0
+    # shellcheck disable=SC2086
+    echo ${by_driver[$best]} | tr ' ' '\n' | sort -V | paste -sd,
+}
+
 # Read inventory output and emit "<nic> <gid_idx>" pairs for ACTIVE NICs that
-# have a usable GID. Filtered by $NICS (whitelist) if non-empty, otherwise the
-# full set minus $SKIP_NICS (blacklist).
+# have a usable GID. Whitelist resolution order:
+#   1. If $NICS is set explicitly, use it verbatim.
+#   2. Otherwise auto-detect the data-plane fabric (largest same-driver group).
+# Then always subtract $SKIP_NICS from the resulting whitelist.
 filter_nics() {
     local want="$NICS"
     local skip="$SKIP_NICS"
+    if [[ -z "$want" ]]; then
+        want=$(auto_detect_data_plane_nics)
+    fi
     while IFS='|' read -r n s l net gi gv; do
         [[ "$s" == "ACTIVE" ]] || continue
         [[ "$gi" != "NA"     ]] || continue
         if [[ -n "$want" ]]; then
             [[ ",$want," == *",$n,"* ]] || continue
-        elif [[ -n "$skip" ]]; then
+        fi
+        if [[ -n "$skip" ]]; then
             [[ ",$skip," == *",$n,"* ]] && continue
         fi
         echo "$n $gi"
@@ -239,8 +282,13 @@ mode_client() {
 
         out=$(ibv_rc_pingpong -d "$nic" -g "$gid" -p "$port" -n "$ITERS" -i 1 \
                 "$PEER_IP" 2>&1); rc=$?
-        line=$(printf '%s\n' "$out" | grep -E "Mbit/sec|usec/iter" | head -1 | xargs)
-        [[ -z "$line" ]] && line=$(printf '%s\n' "$out" | tail -2 | head -1 | xargs)
+        # NB: don't pipe through xargs to trim — error lines from
+        # ibv_rc_pingpong contain unbalanced apostrophes (e.g. "Couldn't
+        # read/write remote address") which break xargs and swallow the
+        # message. sed-trim is quote-safe.
+        trim='s/^[[:space:]]*//;s/[[:space:]]*$//'
+        line=$(printf '%s\n' "$out" | grep -E "Mbit/sec|usec/iter" | head -1 | sed -e "$trim")
+        [[ -z "$line" ]] && line=$(printf '%s\n' "$out" | tail -2 | head -1 | sed -e "$trim")
         if (( rc == 0 )); then
             printf "  %-10s %-6s %-7s %-30s %s\n" "$nic" "$port" "$gid" "${line:0:30}" "$(green PASS)"
         else

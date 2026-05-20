@@ -17,15 +17,56 @@ TP_SIZE=${TP_SIZE:-2}
 HOST=${DECODE_HOST:-0.0.0.0}
 PORT=${DECODE_PORT:-30001}
 
-IB_DEVICES=${IB_DEVICES:-ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7}
+# See run_prefill.sh for the rationale of the heuristic below: pick the
+# largest group of ACTIVE same-driver RDMA NICs as the data-plane fabric.
+auto_detect_ib_devices() {
+    declare -A by_driver=()
+    local d name state drv
+    for d in /sys/class/infiniband/*; do
+        [[ -d "$d" ]] || continue
+        name=$(basename "$d")
+        state=$(cat "$d/ports/1/state" 2>/dev/null || echo "")
+        [[ "$state" == *"ACTIVE"* ]] || continue
+        drv=$(readlink -f "$d/device/driver" 2>/dev/null)
+        drv=$(basename "${drv:-unknown}")
+        by_driver[$drv]+="$name "
+    done
+    local best="" best_count=0 count
+    for drv in "${!by_driver[@]}"; do
+        # shellcheck disable=SC2086
+        count=$(echo ${by_driver[$drv]} | wc -w)
+        if (( count > best_count )); then
+            best_count=$count
+            best=$drv
+        fi
+    done
+    [[ -z "$best" ]] && return 1
+    # shellcheck disable=SC2086
+    echo ${by_driver[$best]} | tr ' ' '\n' | sort -V | paste -sd,
+}
+
+if [[ -z "${IB_DEVICES:-}" ]]; then
+    IB_DEVICES=$(auto_detect_ib_devices || true)
+fi
+if [[ -z "$IB_DEVICES" ]]; then
+    echo "[run_decode] ERROR: no ACTIVE RDMA NICs found and IB_DEVICES is empty" >&2
+    exit 1
+fi
+echo "[run_decode] IB_DEVICES=$IB_DEVICES"
 
 export MC_GID_INDEX=${MC_GID_INDEX:-1}
 
-if [[ -z "${MC_TCP_BIND_ADDRESS:-}" ]]; then
-    MC_TCP_BIND_ADDRESS=$(ip -4 -o addr show 2>/dev/null \
+# See run_prefill.sh for the rationale: lock sglang's local IP resolution to
+# the 10.2.x.x data-plane subnet so mooncake's control plane / handshake
+# endpoint isn't published as the public NIC IP.
+if [[ -z "${SGLANG_HOST_IP:-}" ]]; then
+    SGLANG_HOST_IP=$(ip -4 -o addr show 2>/dev/null \
         | awk '/inet 10\.2\./{split($4,a,"/"); print a[1]; exit}')
 fi
-if [[ -n "${MC_TCP_BIND_ADDRESS:-}" ]]; then
+if [[ -n "${SGLANG_HOST_IP:-}" ]]; then
+    export SGLANG_HOST_IP
+    export HOST_IP="$SGLANG_HOST_IP"
+    : "${MC_TCP_BIND_ADDRESS:=$SGLANG_HOST_IP}"
     export MC_TCP_BIND_ADDRESS
 fi
 

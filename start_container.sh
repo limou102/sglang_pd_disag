@@ -40,6 +40,22 @@ IMAGE=${IMAGE:-lmsysorg/sglang-rocm:v0.5.11-rocm720-mi35x-20260514}
 CONTAINER=${CONTAINER:-sglang-rdma}
 HOST_HOME=${HOST_HOME:-$HOME}
 
+# Container runtime: docker or podman. Auto-detect if not set:
+# prefer docker if the daemon is reachable, otherwise fall back to podman.
+if [[ -z "${CONTAINER_CMD:-}" ]]; then
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        CONTAINER_CMD=docker
+    elif command -v podman >/dev/null 2>&1; then
+        CONTAINER_CMD=podman
+    elif command -v docker >/dev/null 2>&1; then
+        CONTAINER_CMD=docker
+    else
+        echo "[start_container] ERROR: neither docker nor podman is available" >&2
+        exit 2
+    fi
+fi
+echo "[start_container] container runtime : $CONTAINER_CMD"
+
 # Extra bind-mounts / env flags. Pass as ONE shell-quoted string of docker args.
 # Example: EXTRA_MOUNTS="-v /mnt/data:/mnt/data -v /apps:/apps"
 EXTRA_MOUNTS_STR=${EXTRA_MOUNTS:-""}
@@ -78,13 +94,18 @@ find_host_lib() {
         /usr/lib/x86_64-linux-gnu/lib${prov}.so.1 \
         /usr/local/lib/lib${prov}.so.1
     do
-        [[ -e "$c" ]] && { readlink -f "$c"; return 0; }
+        # On some hosts (notably this fleet) /usr/local/lib/libbnxt_re-rdmav34.so
+        # exists as an empty directory placeholder; only accept regular files.
+        [[ -f "$c" && ! -d "$c" ]] && { readlink -f "$c"; return 0; }
     done
     # Fallback: glob versioned files like libionic.so.1.0.54.0-149.g3304be71
     local d f
     for d in /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/local/lib/x86_64-linux-gnu; do
-        f=$(ls -1 "$d"/lib${prov}.so.* 2>/dev/null | head -1 || true)
-        [[ -n "$f" ]] && { readlink -f "$f"; return 0; }
+        for f in "$d"/lib${prov}.so.*; do
+            [[ -f "$f" && ! -d "$f" ]] || continue
+            readlink -f "$f"
+            return 0
+        done
     done
     return 1
 }
@@ -107,9 +128,17 @@ fi
 
 echo "[start_container] host RDMA providers : ${!PROVIDERS[*]}"
 
-# ---- build bind-mount list -------------------------------------------------
+# ---- stage host providers into a side-car directory ------------------------
+#
+# We cannot rely on bind-mounting individual .so files onto paths that may not
+# exist inside the image: with podman+crun, a "file -> missing path" bind
+# mount fails with "Not a directory". Instead we stage every needed provider
+# .so into a dedicated host directory, bind-mount that whole directory under
+# /opt/host-rdma-providers in the container, and let the in-container helper
+# below copy/symlink each .so into the canonical libibverbs locations.
+PROVIDER_STAGE_DIR=$(mktemp -d -t rdma-providers.XXXXXX)
+trap 'rm -rf "$PROVIDER_STAGE_DIR"' EXIT
 
-BIND_MOUNTS=()
 INSTALLED_PROVIDERS=()
 for prov in "${!PROVIDERS[@]}"; do
     src=$(find_host_lib "$prov" || true)
@@ -119,30 +148,21 @@ for prov in "${!PROVIDERS[@]}"; do
     fi
     INSTALLED_PROVIDERS+=("$prov")
     echo "[start_container] $prov : $src"
-
-    # Cover every search path libibverbs (and downstream tools) might use.
-    for dst in \
-        /usr/local/lib/lib${prov}-rdmav34.so \
-        /usr/local/lib/x86_64-linux-gnu/lib${prov}-rdmav34.so \
-        /usr/lib/x86_64-linux-gnu/libibverbs/lib${prov}-rdmav34.so
-    do
-        BIND_MOUNTS+=(-v "$src:$dst:ro")
-    done
-    # Also expose the plain SONAME (libionic.so.1, libmlx5.so.1 ...) which
-    # some tools dlopen directly without the -rdmav34 alias.
-    BIND_MOUNTS+=(-v "$src:/usr/lib/x86_64-linux-gnu/lib${prov}.so.1:ro")
+    cp -f "$src" "$PROVIDER_STAGE_DIR/lib${prov}.so.host"
 done
+
+BIND_MOUNTS=(-v "$PROVIDER_STAGE_DIR:/opt/host-rdma-providers:ro")
 
 # ---- (re)launch container --------------------------------------------------
 
-if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+if $CONTAINER_CMD ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
     echo "[start_container] removing existing container '$CONTAINER'"
-    docker rm -f "$CONTAINER" >/dev/null
+    $CONTAINER_CMD rm -f "$CONTAINER" >/dev/null
 fi
 
 echo "[start_container] launching '$CONTAINER' from '$IMAGE'"
 
-docker run \
+$CONTAINER_CMD run \
     -d \
     --name="$CONTAINER" \
     --ipc=host \
@@ -158,7 +178,6 @@ docker run \
     --device=/dev/infiniband \
     --entrypoint /bin/bash \
     -v "$HOST_HOME":"$HOST_HOME" \
-    -v /mnt:/mnt \
     "${EXTRA_MOUNTS[@]}" \
     "${BIND_MOUNTS[@]}" \
     "$IMAGE" \
@@ -167,20 +186,21 @@ docker run \
 # ---- in-container provider registration ------------------------------------
 
 if (( ${#INSTALLED_PROVIDERS[@]} > 0 )); then
-    docker exec "$CONTAINER" bash -c '
+    $CONTAINER_CMD exec "$CONTAINER" bash -c '
         set -e
+        STAGE=/opt/host-rdma-providers
+        mkdir -p /usr/lib/x86_64-linux-gnu/libibverbs /etc/libibverbs.d
         for prov in '"${INSTALLED_PROVIDERS[*]}"'; do
+            host_so="$STAGE/lib${prov}.so.host"
+            [[ -e "$host_so" ]] || continue
+            # Copy the host provider into the canonical SONAME path and create
+            # all the aliases libibverbs / downstream tools may dlopen.
+            install -m 0755 "$host_so" "/usr/lib/x86_64-linux-gnu/lib${prov}.so.1"
+            ln -sf "lib${prov}.so.1" "/usr/lib/x86_64-linux-gnu/lib${prov}.so"
+            ln -sf "../lib${prov}.so.1" \
+                   "/usr/lib/x86_64-linux-gnu/libibverbs/lib${prov}-rdmav34.so"
             # Register the provider so libibverbs auto-loads it on device probe.
-            mkdir -p /etc/libibverbs.d
             echo "driver ${prov}" > "/etc/libibverbs.d/${prov}.driver"
-            # Some vendors (notably ionic) only ship libfoo.so.1; create the
-            # unversioned alias so downstream consumers can dlopen("libfoo.so").
-            ln -sf "lib${prov}.so.1" "/usr/lib/x86_64-linux-gnu/lib${prov}.so" 2>/dev/null || true
-            # And the libibverbs-style alias under /usr/lib/.../libibverbs/.
-            mkdir -p /usr/lib/x86_64-linux-gnu/libibverbs
-            [[ -e "/usr/lib/x86_64-linux-gnu/libibverbs/lib${prov}-rdmav34.so" ]] \
-                || ln -sf "../lib${prov}.so.1" \
-                          "/usr/lib/x86_64-linux-gnu/libibverbs/lib${prov}-rdmav34.so" 2>/dev/null || true
         done
         ldconfig
         echo "[start_container] /etc/libibverbs.d:"
@@ -188,4 +208,4 @@ if (( ${#INSTALLED_PROVIDERS[@]} > 0 )); then
     '
 fi
 
-echo "[start_container] done. Try: docker exec -it $CONTAINER bash"
+echo "[start_container] done. Try: $CONTAINER_CMD exec -it $CONTAINER bash"
