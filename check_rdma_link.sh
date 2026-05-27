@@ -120,58 +120,39 @@ print_inventory() {
     done < <("$@")
 }
 
-# Auto-pick the data-plane fabric: group ACTIVE RDMA NICs by kernel driver
-# and return the largest group as a comma-separated list. Same heuristic the
-# inference run scripts use, so this preflight matches the NICs mooncake will
-# actually pick at runtime.
-auto_detect_data_plane_nics() {
-    declare -A by_driver=()
-    local d n s drv
-    for d in /sys/class/infiniband/*; do
-        [[ -d "$d" ]] || continue
-        n=$(basename "$d")
-        s=$(cat "$d/ports/1/state" 2>/dev/null || echo "")
-        [[ "$s" == *"ACTIVE"* ]] || continue
-        drv=$(readlink -f "$d/device/driver" 2>/dev/null)
-        drv=$(basename "${drv:-unknown}")
-        by_driver[$drv]+="$n "
-    done
-    local best="" best_count=0 count
-    for drv in "${!by_driver[@]}"; do
-        # shellcheck disable=SC2086
-        count=$(echo ${by_driver[$drv]} | wc -w)
-        if (( count > best_count )); then
-            best_count=$count
-            best=$drv
-        fi
-    done
-    [[ -z "$best" ]] && return 0
-    # shellcheck disable=SC2086
-    echo ${by_driver[$best]} | tr ' ' '\n' | sort -V | paste -sd,
-}
+# Share the NIC ordering logic with run_prefill.sh / run_decode.sh, so this
+# preflight tests exactly the same pairs (and in the same positions) that
+# mooncake will use at runtime. See lib_ib_devices.sh for the details.
+# shellcheck source=lib_ib_devices.sh
+source "$(dirname "$0")/lib_ib_devices.sh"
 
-# Read inventory output and emit "<nic> <gid_idx>" pairs for ACTIVE NICs that
-# have a usable GID. Whitelist resolution order:
-#   1. If $NICS is set explicitly, use it verbatim.
-#   2. Otherwise auto-detect the data-plane fabric (largest same-driver group).
-# Then always subtract $SKIP_NICS from the resulting whitelist.
+# Read inventory output and emit "<nic> <gid_idx>" pairs, preserving the
+# subnet-aligned order returned by aligned_ib_devices.
+#
+# Why preserve that order: mode_server / mode_client below pair the two
+# nodes by *position* (nth NIC on one side talks to nth NIC on the other,
+# via port PORT_BASE+n). For the pairing to land on physically-connected
+# rails, both sides must walk their local NICs in the same subnet-sorted
+# order. Sorting by NIC name (the old behaviour) breaks this whenever the
+# kernel happens to enumerate the local <driver>_N indices differently on
+# the two nodes — which on heterogeneous hardware is the norm.
 filter_nics() {
-    local want="$NICS"
-    local skip="$SKIP_NICS"
-    if [[ -z "$want" ]]; then
-        want=$(auto_detect_data_plane_nics)
-    fi
-    while IFS='|' read -r n s l net gi gv; do
+    local order n
+    order=$(aligned_ib_devices) || return 0
+
+    declare -A gid_by_nic=()
+    while IFS='|' read -r n s _l _net gi _gv; do
         [[ "$s" == "ACTIVE" ]] || continue
         [[ "$gi" != "NA"     ]] || continue
-        if [[ -n "$want" ]]; then
-            [[ ",$want," == *",$n,"* ]] || continue
-        fi
-        if [[ -n "$skip" ]]; then
-            [[ ",$skip," == *",$n,"* ]] && continue
-        fi
+        gid_by_nic["$n"]="$gi"
+    done
+
+    IFS=',' read -ra order_arr <<< "$order"
+    for n in "${order_arr[@]}"; do
+        local gi=${gid_by_nic[$n]:-}
+        [[ -n "$gi" ]] || continue
         echo "$n $gi"
-    done | sort -V
+    done
 }
 
 # -----------------------------------------------------------------------------

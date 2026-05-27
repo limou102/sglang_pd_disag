@@ -23,43 +23,17 @@ PORT=${PREFILL_PORT:-30000}
 BOOTSTRAP_PORT=${PREFILL_BOOTSTRAP_PORT:-8998}
 
 # Auto-detect the RDMA NICs to feed mooncake if IB_DEVICES is not set.
-#
-# Heuristic: among /sys/class/infiniband/*, keep ports in ACTIVE state, group
-# by kernel driver (ionic / mlx5_core / bnxt_re / ...), pick the largest
-# group. This reliably selects the dedicated data-plane fabric on every
-# cluster we've seen so far:
-#   - old cluster (8x ionic, named ionic_0..ionic_7)
-#   - current cluster (8x ionic 'rocepXs0' + 2x bnxt_re mgmt NICs -> ionic wins)
-#   - Mellanox clusters (8x mlx5)
-# If the heuristic guesses wrong, just `export IB_DEVICES=nic_a,nic_b,...`.
-auto_detect_ib_devices() {
-    declare -A by_driver=()
-    local d name state drv
-    for d in /sys/class/infiniband/*; do
-        [[ -d "$d" ]] || continue
-        name=$(basename "$d")
-        state=$(cat "$d/ports/1/state" 2>/dev/null || echo "")
-        [[ "$state" == *"ACTIVE"* ]] || continue
-        drv=$(readlink -f "$d/device/driver" 2>/dev/null)
-        drv=$(basename "${drv:-unknown}")
-        by_driver[$drv]+="$name "
-    done
-    local best="" best_count=0 count
-    for drv in "${!by_driver[@]}"; do
-        # shellcheck disable=SC2086
-        count=$(echo ${by_driver[$drv]} | wc -w)
-        if (( count > best_count )); then
-            best_count=$count
-            best=$drv
-        fi
-    done
-    [[ -z "$best" ]] && return 1
-    # shellcheck disable=SC2086
-    echo ${by_driver[$best]} | tr ' ' '\n' | sort -V | paste -sd,
-}
+# See lib_ib_devices.sh for the full rationale; the short version is:
+#   * pick the largest same-driver group of ACTIVE NICs as the data-plane;
+#   * sort that group by RoCE GID subnet so list positions align across nodes
+#     (required by mooncake's device_id-indexed pairing).
+# Override either piece manually with `export IB_DEVICES=nic_a,nic_b,...`
+# or restrict the candidate pool with `export NICS=...` / `export SKIP_NICS=...`.
+# shellcheck source=lib_ib_devices.sh
+source "$(dirname "$0")/lib_ib_devices.sh"
 
 if [[ -z "${IB_DEVICES:-}" ]]; then
-    IB_DEVICES=$(auto_detect_ib_devices || true)
+    IB_DEVICES=$(aligned_ib_devices || true)
 fi
 if [[ -z "$IB_DEVICES" ]]; then
     echo "[run_prefill] ERROR: no ACTIVE RDMA NICs found and IB_DEVICES is empty" >&2

@@ -17,36 +17,14 @@ TP_SIZE=${TP_SIZE:-2}
 HOST=${DECODE_HOST:-0.0.0.0}
 PORT=${DECODE_PORT:-30001}
 
-# See run_prefill.sh for the rationale of the heuristic below: pick the
-# largest group of ACTIVE same-driver RDMA NICs as the data-plane fabric.
-auto_detect_ib_devices() {
-    declare -A by_driver=()
-    local d name state drv
-    for d in /sys/class/infiniband/*; do
-        [[ -d "$d" ]] || continue
-        name=$(basename "$d")
-        state=$(cat "$d/ports/1/state" 2>/dev/null || echo "")
-        [[ "$state" == *"ACTIVE"* ]] || continue
-        drv=$(readlink -f "$d/device/driver" 2>/dev/null)
-        drv=$(basename "${drv:-unknown}")
-        by_driver[$drv]+="$name "
-    done
-    local best="" best_count=0 count
-    for drv in "${!by_driver[@]}"; do
-        # shellcheck disable=SC2086
-        count=$(echo ${by_driver[$drv]} | wc -w)
-        if (( count > best_count )); then
-            best_count=$count
-            best=$drv
-        fi
-    done
-    [[ -z "$best" ]] && return 1
-    # shellcheck disable=SC2086
-    echo ${by_driver[$best]} | tr ' ' '\n' | sort -V | paste -sd,
-}
+# See lib_ib_devices.sh for the full rationale; in short: pick the largest
+# same-driver group of ACTIVE NICs and sort by GID subnet so list positions
+# align across nodes (mooncake pairs the two sides by device_id index).
+# shellcheck source=lib_ib_devices.sh
+source "$(dirname "$0")/lib_ib_devices.sh"
 
 if [[ -z "${IB_DEVICES:-}" ]]; then
-    IB_DEVICES=$(auto_detect_ib_devices || true)
+    IB_DEVICES=$(aligned_ib_devices || true)
 fi
 if [[ -z "$IB_DEVICES" ]]; then
     echo "[run_decode] ERROR: no ACTIVE RDMA NICs found and IB_DEVICES is empty" >&2
