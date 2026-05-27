@@ -1,44 +1,46 @@
 # =============================================================================
-# lib_ib_devices.sh — shared helpers for picking RDMA NICs in a cross-node
-# aligned order.
+# lib_ib_devices.sh — shared helpers for picking RDMA NICs.
 #
-# This file is meant to be sourced (not executed). After sourcing, the public
-# function `aligned_ib_devices` returns a comma-separated NIC list whose
-# *position* is the same on every node of the cluster, even if the kernel
-# enumerates the local ionic_N / mlx5_N indices in a different order on each
-# host.
-#
-# Why position alignment matters
-# ------------------------------
-# Mooncake's RDMA transport (see mooncake-transfer-engine/src/transport/
-# rdma_transport/worker_pool.cpp) pairs the two sides of a transfer by
-# *device_id index*: when the sender picks its local context_list_[i], it
-# directly indexes peer_segment_desc->devices[i] for the remote NIC. The two
-# sides MUST therefore expose lists in which position i refers to NICs that
-# can talk to each other (same RoCE subnet / same rail).
-#
-# Aligning by GID subnet
-# ----------------------
-# Every NIC on a given rail shares the same /64 GID subnet prefix. Sorting
-# each node's local NIC list by that prefix is a stable per-node operation
-# that produces the same global ordering on every node, with no inter-node
-# coordination needed.
+# This file is meant to be sourced (not executed). It exposes the public
+# function `aligned_ib_devices`, used by run_prefill.sh / run_decode.sh /
+# check_rdma_link.sh.
 #
 # Public API
 # ----------
 #   aligned_ib_devices
-#       Print one line: "<nic>,<nic>,..." sorted by GID subnet.
+#       Print one line: "<nic>,<nic>,..." with the data-plane NICs.
+#       Default ordering is the kernel's natural NIC-name order
+#       (e.g. ionic_0, ionic_1, ..., ionic_7); export
+#       `IB_DEVICES_SORT_BY_SUBNET=1` to instead order by RoCE GID subnet
+#       (first 64 bits of the GID at MC_GID_INDEX) — useful when the
+#       downstream consumer pairs NICs by list position across nodes.
 #       Returns non-zero if no usable NIC found.
 #
 # Tunables (env)
 # --------------
-#   MC_GID_INDEX   GID index used as the sort key (default 1).
-#                  Must match what the inference server / pingpong actually
-#                  uses, so the sort key reflects the real path.
-#   NICS           Comma-separated whitelist. If set, restrict the candidate
-#                  pool to these NIC names (but still sort by subnet).
-#   SKIP_NICS      Comma-separated blacklist. NICs in this list are removed
-#                  from the result (after whitelist / auto-detect).
+#   MC_GID_INDEX                GID index read when subnet sorting is on
+#                               (default 1). Must match what the inference
+#                               server / pingpong actually uses, so the sort
+#                               key reflects the real RDMA path.
+#   NICS                        Comma-separated whitelist. If set, restrict
+#                               the candidate pool to these NIC names.
+#   SKIP_NICS                   Comma-separated blacklist. NICs in this list
+#                               are removed from the result (after whitelist
+#                               / auto-detect).
+#   IB_DEVICES_SORT_BY_SUBNET   If "1" / "true" / "yes", switch ordering from
+#                               NIC name to GID subnet. Off by default.
+#
+# Why subnet sorting exists
+# -------------------------
+# A given cluster typically has N RoCE "rails", each rail = one RDMA switch
+# = one /64 IPv6 GID subnet. On every node, one NIC sits on each rail.
+# Kernels do NOT guarantee that the local <driver>_N indexing follows the
+# same physical order across hosts: the same physical NIC at PCI 09:00.0
+# may be `ionic_0` on one node and `ionic_3` on another. When a peer pairs
+# the two sides by list position (e.g. "my Nth NIC talks to your Nth NIC"),
+# sorting both sides by the rail's GID subnet — a globally stable key —
+# makes "position i" mean "the NIC on the i-th rail" everywhere, with no
+# inter-node coordination needed.
 # =============================================================================
 
 # Internal: scan /sys/class/infiniband, keep ACTIVE ports, group by kernel
@@ -86,6 +88,7 @@ _ib_subnet_of() {
 aligned_ib_devices() {
     local want="${NICS:-}"
     local skip="${SKIP_NICS:-}"
+    local sort_by_subnet="${IB_DEVICES_SORT_BY_SUBNET:-0}"
     local group
 
     if [[ -n "$want" ]]; then
@@ -94,13 +97,33 @@ aligned_ib_devices() {
         group=$(_ib_data_plane_group) || return 1
     fi
 
-    local n subnet
-    local -a rows=()
+    # Apply the SKIP_NICS blacklist to the candidate set first; both ordering
+    # modes consume the same filtered list.
+    local n
+    local -a candidates=()
     for n in $group; do
         [[ -n "$skip" && ",$skip," == *",$n,"* ]] && continue
-        subnet=$(_ib_subnet_of "$n") || continue
-        rows+=("$subnet $n")
+        candidates+=("$n")
     done
-    (( ${#rows[@]} > 0 )) || return 1
-    printf '%s\n' "${rows[@]}" | sort | awk '{print $2}' | paste -sd,
+    (( ${#candidates[@]} > 0 )) || return 1
+
+    case "${sort_by_subnet,,}" in
+        1|true|yes|on)
+            # Subnet-sorted ordering: read each NIC's GID subnet (NICs whose
+            # GID at MC_GID_INDEX isn't usable are dropped here).
+            local subnet
+            local -a rows=()
+            for n in "${candidates[@]}"; do
+                subnet=$(_ib_subnet_of "$n") || continue
+                rows+=("$subnet $n")
+            done
+            (( ${#rows[@]} > 0 )) || return 1
+            printf '%s\n' "${rows[@]}" | sort | awk '{print $2}' | paste -sd,
+            ;;
+        *)
+            # Default: kernel's natural NIC-name order (sort -V keeps ionic_2
+            # before ionic_10 etc.).
+            printf '%s\n' "${candidates[@]}" | sort -V | paste -sd,
+            ;;
+    esac
 }
