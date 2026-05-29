@@ -59,7 +59,7 @@ python -m sglang.launch_server \
     --mem-fraction-static 0.90 \
     --attention-backend aiter \
     --enable-aiter-allreduce-fusion \
-    --page-size 1 \
+    --page-size 64 \
     --max-running-requests 64 \
     --stream-interval 10 \
     --host "$HOST" \

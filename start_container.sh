@@ -36,7 +36,7 @@
 set -euo pipefail
 
 # ---- user-configurable -----------------------------------------------------
-IMAGE=${IMAGE:-lmsysorg/sglang-rocm:v0.5.11-rocm720-mi35x-20260514}
+IMAGE=${IMAGE:-lmsysorg/sglang-rocm:v0.5.12.post1-rocm720-mi35x-20260526}
 CONTAINER=${CONTAINER:-sglang-rdma}
 HOST_HOME=${HOST_HOME:-$HOME}
 

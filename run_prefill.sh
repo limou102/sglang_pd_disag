@@ -74,7 +74,7 @@ python -m sglang.launch_server \
     --enable-hierarchical-cache \
     --chunked-prefill-size 16384 \
     --max-prefill-tokens 16384 \
-    --page-size 1 \
+    --page-size 64 \
     --hicache-ratio 1.5 \
     --max-running-requests 64 \
     --stream-interval 10 \
